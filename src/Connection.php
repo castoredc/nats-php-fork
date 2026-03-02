@@ -60,6 +60,9 @@ class Connection
         $iteration = 0;
 
         while (true) {
+            if (!is_resource($this->socket) || feof($this->socket)) {
+                throw new LogicException('supplied resource is not a valid stream resource');
+            }
             $message = null;
             $line = stream_get_line($this->socket, 1024, "\r\n");
             $now = microtime(true);

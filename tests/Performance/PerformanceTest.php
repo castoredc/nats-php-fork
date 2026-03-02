@@ -4,10 +4,14 @@ declare(strict_types=1);
 
 namespace Tests\Performance;
 
+use Basis\Nats\Consumer\DeliverPolicy;
+use Basis\Nats\Stream\RetentionPolicy;
+use Basis\Nats\Stream\StorageBackend;
 use Tests\FunctionalTestCase;
 
 class PerformanceTest extends FunctionalTestCase
 {
+    private const CONSUMER_BATCH_SIZE = 50;
     private int $limit = 500_000;
     private int $counter = 0;
     private int $bigMessageIterationLimit = 1000;
@@ -74,6 +78,47 @@ class PerformanceTest extends FunctionalTestCase
         ]);
 
         // at least 50rps should be enough for test
-        $this->assertGreaterThan(50, $this->bigMessageIterationLimit / $publishing);
+        $this->assertGreaterThan(self::CONSUMER_BATCH_SIZE, $this->bigMessageIterationLimit / $publishing);
+    }
+
+    public function testFetchNoWait()
+    {
+        $client = $this->createClient(['timeout' => 10])->setDelay(0);
+        $stream = $client->getApi()->getStream('test_fetch_no_wait');
+        $stream
+            ->getConfiguration()
+            ->setRetentionPolicy(RetentionPolicy::INTEREST)
+            ->setStorageBackend(StorageBackend::MEMORY)
+            ->setSubjects(['test']);
+
+        $stream->create();
+
+        $consumer = $stream->getConsumer('fetch_no_waiter');
+        $consumer->getConfiguration()
+            ->setSubjectFilter('test')
+            ->setDeliverPolicy(DeliverPolicy::NEW);
+        $consumer->create();
+        $consumer
+            ->setBatching(self::CONSUMER_BATCH_SIZE)
+            ->setExpires(0);
+
+        foreach (range(1, 10) as $n) {
+            $stream->publish('test', 'Hello, NATS JetStream '.$n.'!');
+        }
+
+        $fetching = microtime(true);
+        // fetch more than available messages to test no-wait behavior
+        $messages = $consumer->getQueue()->fetchAll($consumer->getBatching());
+        $fetching = microtime(true) - $fetching;
+
+        $this->logger?->info('fetched with no-wait', [
+            'length' => count($messages),
+            'time' => $fetching,
+        ]);
+
+        // 10 messages were published + 1 404 message to signal the empty stream
+        $this->assertCount(11, $messages);
+        $this->assertEquals('404', end($messages)->payload->getHeader('Status-Code'), 'Last message should be 404');
+        $this->assertLessThan(1, (int)$fetching, 'Fetching with no-wait should be faster than the timeout');
     }
 }

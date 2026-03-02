@@ -5,6 +5,8 @@ declare(strict_types=1);
 namespace Tests\Functional;
 
 use Basis\Nats\Connection;
+use Basis\Nats\Message\Factory;
+use Basis\Nats\Message\Subscribe;
 use Monolog\Handler\StreamHandler;
 use Monolog\Logger;
 use ReflectionProperty;
@@ -25,7 +27,6 @@ class ClientTest extends FunctionalTestCase
         $this->assertTrue($client->ping());
 
         $property = new ReflectionProperty(Connection::class, 'socket');
-        $property->setAccessible(true);
         fclose($property->getValue($client->connection));
 
         $this->expectExceptionMessage('supplied resource is not a valid stream resource');

@@ -7,15 +7,19 @@ namespace Tests\Functional;
 use Basis\Nats\Consumer\AckPolicy;
 use Basis\Nats\Consumer\Configuration;
 use Basis\Nats\Consumer\Consumer;
+use Basis\Nats\Consumer\DeliverPolicy;
 use Basis\Nats\Consumer\ReplayPolicy;
 use Basis\Nats\Message\Payload;
 use Basis\Nats\Stream\ConsumerLimits;
 use Basis\Nats\Stream\RetentionPolicy;
 use Basis\Nats\Stream\StorageBackend;
+use Exception;
 use Tests\FunctionalTestCase;
 
 class StreamTest extends FunctionalTestCase
 {
+    private const CONSUMER_BATCH_SIZE = 50;
+
     private mixed $called;
 
     private bool $empty;
@@ -623,6 +627,53 @@ class StreamTest extends FunctionalTestCase
             if ($i == $loops) {
                 $this->assertSame($expected, $actual);
             }
+        }
+    }
+
+    public function testFetchLessThanBatch()
+    {
+        $client = $this->createClient(['timeout' => 10])->setDelay(0);
+        $stream = $client->getApi()->getStream('test_fetch_no_wait');
+        $stream
+            ->getConfiguration()
+            ->setRetentionPolicy(RetentionPolicy::INTEREST)
+            ->setStorageBackend(StorageBackend::MEMORY)
+            ->setSubjects(['test']);
+
+        $stream->create();
+
+        $consumer = $stream->getConsumer('fetch_no_waiter');
+        $consumer->getConfiguration()
+            ->setSubjectFilter('test')
+            ->setDeliverPolicy(DeliverPolicy::NEW);
+        $consumer->create();
+        $consumer
+            ->setBatching(self::CONSUMER_BATCH_SIZE)
+            ->setExpires(0);
+
+        foreach (range(1, 10) as $n) {
+            $stream->publish('test', 'Hello, NATS JetStream '.$n.'!');
+        }
+
+        $fetching = microtime(true);
+        // fetch more than available messages to test no-wait behavior
+        $messages = $consumer->getQueue()->fetchAll($consumer->getBatching());
+        $fetching = microtime(true) - $fetching;
+
+        $this->logger?->info('fetched with no-wait', [
+            'length' => count($messages),
+            'time' => $fetching,
+        ]);
+
+        // 10 messages were published + 1 404 message to signal the empty stream
+        $this->assertCount(11, $messages);
+        $last = end($messages);
+
+        try {
+            $this->assertEquals('404', $last->payload->getHeader('Status-Code'), 'Last message should be 404');
+        } catch (Exception) {
+            // https://github.com/nats-io/nats-server/pull/7466
+            $this->assertEquals('408', $last->payload->getHeader('Status-Code'), 'Last message should be 408 for legacy nats installations');
         }
     }
 }

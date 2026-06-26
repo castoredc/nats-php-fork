@@ -5,6 +5,7 @@ declare(strict_types=1);
 namespace Basis\Nats\Consumer;
 
 use Basis\Nats\Client;
+use Basis\Nats\Consumer\Configuration;
 use Basis\Nats\Queue;
 use Basis\Nats\Message\Payload;
 use Basis\Nats\Message\Publish;
@@ -18,26 +19,28 @@ class Consumer
     private float $expires = 0.1;
     private int $batch = 1;
     private int $iterations = PHP_INT_MAX;
+    private ?Configuration $configuration = null;
 
     public function __construct(
         public readonly Client $client,
-        private readonly Configuration $configuration,
+        private readonly string $stream,
+        private readonly ?string $name = null,
     ) {
     }
 
     public function create($ifNotExists = true): self
     {
         if ($this->shouldCreateConsumer($ifNotExists)) {
-            if ($this->configuration->isEphemeral()) {
+            if ($this->getConfiguration()->isEphemeral()) {
                 $command = 'CONSUMER.CREATE.' . $this->getStream();
             } else {
                 $command = 'CONSUMER.DURABLE.CREATE.' . $this->getStream() . '.' . $this->getName();
             }
 
-            $result = $this->client->api($command, $this->configuration->toArray());
+            $result = $this->client->api($command, $this->getConfiguration()->toArray());
 
-            if ($this->configuration->isEphemeral()) {
-                $this->configuration->setName($result->name);
+            if ($this->getConfiguration()->isEphemeral()) {
+                $this->getConfiguration()->setName($result->name);
             }
 
             $this->exists = true;
@@ -59,23 +62,38 @@ class Consumer
         if ($this->exists !== null) {
             return $this->exists;
         }
-        $consumers = $this->client->getApi()->getStream($this->getStream())->getConsumerNames();
+        $stream = $this->client->getApi()->getStream($this->getStream());
+        if (!$stream->exists()) {
+            return false;
+        }
+        $consumers = $stream->getConsumerNames();
         return $this->exists = in_array($this->getName(), $consumers);
     }
 
     public function getConfiguration(): Configuration
     {
+        if ($this->configuration === null) {
+            if ($this->exists()) {
+                $this->configuration = Configuration::fromObject($this->info()->getValues());
+            } else {
+                $this->configuration = new Configuration($this->getStream(), $this->getName());
+            }
+        }
         return $this->configuration;
     }
 
-    public function getName(): string
+    public function getName(): ?string
     {
-        return $this->getConfiguration()->getName();
+        // For ephemeral consumers, get name from configuration after creation
+        if ($this->name === null && $this->configuration !== null) {
+            return $this->configuration->getName();
+        }
+        return $this->name;
     }
 
     public function getStream(): string
     {
-        return $this->getConfiguration()->getStream();
+        return $this->stream;
     }
 
     public function getBatching(): int
@@ -134,7 +152,6 @@ class Consumer
         while (!$this->interrupt && $iterations--) {
             $messages = $queue->fetchAll($this->getBatching());
             foreach ($messages as $message) {
-                $processed++;
                 $payload = $message->payload;
                 if ($payload->isEmpty()) {
                     if ($emptyHandler && !in_array($payload->getHeader('KV-Operation'), ['DEL', 'PURGE'])) {
@@ -142,6 +159,7 @@ class Consumer
                     }
                     continue;
                 }
+                $processed++;
                 try {
                     $messageHandler($payload, $message->replyTo);
                     if ($ack) {
@@ -175,7 +193,7 @@ class Consumer
         return $this->client->api("CONSUMER.INFO." . $this->getStream() . '.' . $this->getName());
     }
 
-    public function interrupt()
+    public function interrupt(): void
     {
         $this->interrupt = true;
     }
@@ -185,6 +203,11 @@ class Consumer
         $this->batch = $batch;
 
         return $this;
+    }
+
+    public function setConfiguration(Configuration $configuration): void
+    {
+        $this->configuration = $configuration;
     }
 
     public function setDelay(float $delay): self
@@ -210,7 +233,7 @@ class Consumer
 
     private function shouldCreateConsumer(bool $ifNotExists): bool
     {
-        return ($this->configuration->isEphemeral() && $this->configuration->getName() === null)
+        return ($this->getConfiguration()->isEphemeral() && $this->getConfiguration()->getName() === null)
             || !$this->exists();
     }
 }

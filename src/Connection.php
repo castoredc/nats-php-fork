@@ -55,14 +55,50 @@ class Connection
 
     public function getMessage(null|int|float $timeout = 0): ?Message
     {
+        // null means use config timeout, 0 means non-blocking check
+        if ($timeout === null) {
+            $timeout = $this->config->timeout;
+        }
+
         $now = microtime(true);
-        $max = $now + $timeout;
+        $max = $timeout > 0 ? $now + $timeout : PHP_FLOAT_MAX;
         $iteration = 0;
 
         while (true) {
             if (!is_resource($this->socket) || feof($this->socket)) {
                 throw new LogicException('supplied resource is not a valid stream resource');
             }
+
+            $remainingTimeout = $max - microtime(true);
+            if ($remainingTimeout <= 0) {
+                break;
+            }
+
+            $read = [$this->socket];
+            $write = null;
+            $except = null;
+
+            // Calculate timeout for stream_select
+            if ($timeout === 0) {
+                // Non-blocking check - use stream_select with 0 timeout to check if data is available
+                $seconds = 0;
+                $microseconds = 0;
+            } else {
+                $seconds = (int) floor($remainingTimeout);
+                $microseconds = (int) (($remainingTimeout - $seconds) * 1_000_000);
+            }
+
+            $result = stream_select($read, $write, $except, $seconds, $microseconds);
+
+            if ($result === false || $result === 0) {
+                // For non-blocking check (timeout=0), exit immediately
+                if ($timeout === 0) {
+                    break;
+                }
+                // For blocking calls, continue waiting
+                continue;
+            }
+
             $message = null;
             $line = stream_get_line($this->socket, 1024, "\r\n");
             $now = microtime(true);
@@ -83,6 +119,7 @@ class Connection
                     $this->sendMessage(new Pong([]));
                 } elseif ($message instanceof Pong) {
                     $this->pongAt = $now;
+                    return $message;
                 } elseif ($message instanceof Info) {
                     if (isset($message->tls_verify) && $message->tls_verify && !$this->config->tlsHandshakeFirst) {
                         $this->enableTls(true);
@@ -97,9 +134,6 @@ class Connection
                         $this->sendMessage(new Ping());
                     }
                 }
-            }
-            if ($now > $max) {
-                break;
             }
             if ($message && $now < $max) {
                 $this->logger?->debug('sleep', compact('max', 'now'));
@@ -126,7 +160,7 @@ class Connection
         return $this->pingAt <= $this->pongAt;
     }
 
-    public function sendMessage(Message $message)
+    public function sendMessage(Message $message): void
     {
         $this->init();
 
@@ -147,7 +181,7 @@ class Connection
                 }
                 $total += $written;
 
-                if ($length == $total) {
+                if ($length === $total) {
                     break;
                 }
             } catch (Throwable $e) {
@@ -170,24 +204,24 @@ class Connection
         }
     }
 
-    public function setLogger(?LoggerInterface $logger)
+    public function setLogger(?LoggerInterface $logger): void
     {
         $this->logger = $logger;
     }
 
-    public function setTimeout(float $value)
+    public function setTimeout(float $value): void
     {
         $this->init();
         $seconds = (int) floor($value);
-        $milliseconds = (int) (1000 * ($value - $seconds));
+        $microseconds = (int) (1000000 * ($value - $seconds));
 
-        stream_set_timeout($this->socket, $seconds, $milliseconds);
+        stream_set_timeout($this->socket, $seconds, $microseconds);
     }
 
-    protected function init()
+    protected function init(): void
     {
         if ($this->socket) {
-            return $this;
+            return;
         }
 
         $config = $this->config;
@@ -212,8 +246,14 @@ class Connection
             $this->connectMessage->name = $this->client->getName();
         }
 
-        $this->infoMessage = $this->getMessage($config->timeout);
-        assert($this->infoMessage instanceof Info);
+        $infoMessage = $this->getMessage($config->timeout);
+        if (is_null($infoMessage)) {
+            throw new Exception("Timeout waiting for message from server.");
+        }
+        if (!$infoMessage instanceof Info) {
+            throw new Exception("Received unexpected message type: " . $infoMessage::class);
+        }
+        $this->infoMessage = $infoMessage;
 
         if (isset($this->infoMessage->nonce) && $this->authenticator) {
             $this->connectMessage->sig = $this->authenticator->sign($this->infoMessage->nonce);
@@ -265,7 +305,7 @@ class Connection
                 $this->config->delay($iteration++);
                 continue;
             }
-            if (strlen($payloadLine) != $length) {
+            if (strlen($payloadLine) !== $length) {
                 $this->logger?->debug(
                     'got ' . strlen($payloadLine) . '/' . $length . ': ' . $payloadLine
                 );
@@ -275,7 +315,7 @@ class Connection
         return $payload;
     }
 
-    private function processException(Throwable $e)
+    private function processException(Throwable $e): void
     {
         $this->logger?->error($e->getMessage(), ['exception' => $e]);
 

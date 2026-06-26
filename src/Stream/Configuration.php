@@ -24,6 +24,7 @@ class Configuration
     private ?int $maxMessagesPerSubject = null;
     private ?string $description = null;
     private ?array $consumerLimits = null;
+    private ?bool $allowMsgSchedules = null;
 
     public function __construct(
         public readonly string $name
@@ -39,6 +40,60 @@ class Configuration
             ->setRetentionPolicy($array['retention'])
             ->setStorageBackend($array['storage'])
             ->setSubjects($array['subjects']);
+    }
+
+    public static function fromObject(object $object): self
+    {
+        $config = new static($object->name);
+
+        $config->setDiscardPolicy($object->discard);
+        $config->setMaxConsumers($object->max_consumers);
+        $config->setReplicas($object->replicas ?? $object->num_replicas);
+        $config->setRetentionPolicy($object->retention);
+        $config->setStorageBackend($object->storage);
+        $config->setSubjects($object->subjects);
+
+        if (isset($object->allow_rollup_hdrs)) {
+            $config->setAllowRollupHeaders($object->allow_rollup_hdrs);
+        }
+
+        if (isset($object->deny_delete)) {
+            $config->setDenyDelete($object->deny_delete);
+        }
+
+        if (isset($object->description)) {
+            $config->setDescription($object->description);
+        }
+
+        if (isset($object->duplicate_window)) {
+            $config->setDuplicateWindow($object->duplicate_window / 1_000_000_000);
+        }
+
+        if (isset($object->max_age)) {
+            $config->setMaxAge($object->max_age);
+        }
+
+        if (isset($object->max_bytes)) {
+            $config->setMaxBytes($object->max_bytes);
+        }
+
+        if (isset($object->max_msg_size)) {
+            $config->setMaxMessageSize($object->max_msg_size);
+        }
+
+        if (isset($object->max_msgs_per_subject)) {
+            $config->setMaxMessagesPerSubject($object->max_msgs_per_subject);
+        }
+
+        if (isset($object->consumer_limits)) {
+            $config->setConsumerLimits((array) $object->consumer_limits);
+        }
+
+        if (isset($object->allow_msg_schedules)) {
+            $config->setAllowMsgSchedules($object->allow_msg_schedules);
+        }
+
+        return $config;
     }
 
     public function getAllowRollupHeaders(): bool
@@ -91,7 +146,7 @@ class Configuration
         return $this->maxMessagesPerSubject;
     }
 
-    public function getName()
+    public function getName(): string
     {
         return $this->name;
     }
@@ -125,6 +180,12 @@ class Configuration
     public function setDenyDelete(bool $denyDelete): self
     {
         $this->denyDelete = $denyDelete;
+        return $this;
+    }
+
+    public function setDescription(?string $description): self
+    {
+        $this->description = $description;
         return $this;
     }
 
@@ -208,6 +269,17 @@ class Configuration
         return $this->consumerLimits;
     }
 
+    public function setAllowMsgSchedules(?bool $allowMsgSchedules): self
+    {
+        $this->allowMsgSchedules = $allowMsgSchedules;
+        return $this;
+    }
+
+    public function getAllowMsgSchedules(): ?bool
+    {
+        return $this->allowMsgSchedules;
+    }
+
     public function toArray(): array
     {
         $config = [
@@ -227,6 +299,7 @@ class Configuration
             'storage' => $this->getStorageBackend(),
             'subjects' => $this->getSubjects(),
             'consumer_limits' => $this->getConsumerLimits(),
+            'allow_msg_schedules' => $this->getAllowMsgSchedules(),
         ];
 
         foreach ($config as $k => $v) {

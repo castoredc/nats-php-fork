@@ -66,7 +66,7 @@ class Connection
 
         while (true) {
             if (!is_resource($this->socket) || feof($this->socket)) {
-                throw new LogicException('supplied resource is not a valid stream resource');
+                $this->processException(new LogicException('supplied resource is not a valid stream resource'));
             }
 
             $remainingTimeout = $max - microtime(true);
@@ -285,6 +285,10 @@ class Connection
                 throw new Exception("tlsCaFile file does not exist: " . $this->config->tlsCaFile);
             }
             stream_context_set_option($this->context, 'ssl', 'cafile', $this->config->tlsCaFile);
+            stream_context_set_option($this->context, 'ssl', 'verify_peer', true);
+            stream_context_set_option($this->context, 'ssl', 'verify_peer_name', false);
+        } else {
+            stream_context_set_option($this->context, 'ssl', 'verify_peer', false);
         }
 
         if (!stream_socket_enable_crypto($this->socket, true, STREAM_CRYPTO_METHOD_TLSv1_2_CLIENT)) {
@@ -323,14 +327,22 @@ class Connection
             throw $e;
         }
 
+        $maxAttempts = $this->config->maxReconnectAttempts;
         $iteration = 0;
 
         while (true) {
+            if ($maxAttempts >= 0 && $iteration >= $maxAttempts) {
+                // reconnect attempts exhausted: rethrow the last connection error
+                throw $e;
+            }
+            if ($iteration > 0) {
+                $this->config->delay($iteration - 1);
+            }
             try {
                 $this->socket = null;
                 $this->init();
             } catch (Throwable $e) {
-                $this->config->delay($iteration++);
+                $iteration++;
                 continue;
             }
             break;

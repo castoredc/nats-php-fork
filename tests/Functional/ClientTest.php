@@ -19,6 +19,22 @@ class ClientTest extends FunctionalTestCase
         $this->assertTrue($this->createClient()->ping());
     }
 
+    public function testPingWithTimeout()
+    {
+        $client = $this->createClient(['timeout' => 10]);
+
+        $start = microtime(true);
+        $result = $client->ping();
+        $elapsed = microtime(true) - $start;
+
+        $this->assertTrue($result, 'ping() should return true');
+        $this->assertLessThan(
+            1.0,
+            $elapsed,
+            "ping() should complete faster than configured timeout (10s). Took: {$elapsed}s"
+        );
+    }
+
     public function testConnectionTimeout(): void
     {
         $client = $this->createClient([
@@ -67,9 +83,8 @@ class ClientTest extends FunctionalTestCase
         $this->assertTrue($client->ping());
         $this->assertCount(1, $client->getSubscriptions());
 
-        $property = new ReflectionProperty(Connection::class, 'socket');
-        $property->setAccessible(true);
         $spy->records = [];
+        $property = new ReflectionProperty(Connection::class, 'socket');
         fclose($property->getValue($client->connection));
 
         // test reconnect
@@ -80,11 +95,10 @@ class ClientTest extends FunctionalTestCase
 
     public function testPacketSizeSetter()
     {
-        $property = new ReflectionProperty(Connection::class, 'packetSize');
-        $property->setAccessible(true);
-
         $client = $this->getClient();
         $client->connection->setPacketSize(512);
+
+        $property = new ReflectionProperty(Connection::class, 'packetSize');
         $this->assertSame($property->getValue($client->connection), 512);
     }
 
@@ -169,7 +183,6 @@ class ClientTest extends FunctionalTestCase
         $connection->close();
 
         $property = new ReflectionProperty(Connection::class, 'socket');
-        $property->setAccessible(true);
 
         // Assert that the socket is closed and set to null
         self::assertNull($property->getValue($connection));

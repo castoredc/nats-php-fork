@@ -211,7 +211,7 @@ $greeter->handle(function ($address) {
 var_dump($greeter->info()); // can consumer info
 
 $goodbyer = $stream->getConsumer('goodbyer');
-$goodbyer->getConfiguration()->setSubjectFilter('mailer.bye');
+$goodbyer->getConfiguration()->setSubjectFilters(['mailer.bye']);
 $goodbyer->create(); // create consumer if you don't want to handle anything right now
 $goodbyer->handle(function ($address) {
     mail($address, "See you later");
@@ -430,20 +430,22 @@ model name	: AMD Ryzen 5 3600X 6-Core Processor
 
 The following is the list of configuration options and default values.
 
-| Option              | Default    | Description                                                                                                                                                                                 |
-| ------------------- | ---------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `inboxPrefix`       | `"_INBOX"` | Sets de prefix for automatically created inboxes                                                                                                                                            |
-| `jwt`               |            | Token for [JWT Authentication](https://docs.nats.io/running-a-nats-service/configuration/securing_nats/auth_intro/jwt). Alternatively you can use [CredentialsParser](#connecting-with-jwt) |
-| `nkey`              |            | Ed25519 based public key signature used for [NKEY Authentication](https://docs.nats.io/running-a-nats-service/configuration/securing_nats/auth_intro/nkey_auth).                            |
-| `pass`              |            | Sets the password for a connection.                                                                                                                                                         |
-| `pedantic`          | `false`    | Turns on strict subject format checks.                                                                                                                                                      |
-| `pingInterval`      | `2`        | Number of seconds between client-sent pings.                                                                                                                                                |
-| `port`              | `4222`     | Port to connect to (only used if `servers` is not specified).                                                                                                                               |
-| `timeout`           | 1          | Number of seconds the client will wait for a connection to be established.                                                                                                                  |
-| `token`             |            | Sets a authorization token for a connection.                                                                                                                                                |
-| `tlsHandshakeFirst` | `false`    | If true, the client performs the TLS handshake immediately after connecting, without waiting for the server’s INFO message.                                                                 |
-| `tlsKeyFile`        |            | TLS 1.2 Client key file path.                                                                                                                                                               |
-| `tlsCertFile`       |            | TLS 1.2 Client certificate file path.                                                                                                                                                       |
-| `tlsCaFile`         |            | TLS 1.2 CA certificate filepath.                                                                                                                                                            |
-| `user`              |            | Sets the username for a connection.                                                                                                                                                         |
-| `verbose`           | `false`    | Turns on `+OK` protocol acknowledgements.                                                                                                                                                   |
+| Option                 | Default    | Description                                                                                                                                                                                 |
+| ---------------------- | ---------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `inboxPrefix`          | `"_INBOX"` | Sets de prefix for automatically created inboxes                                                                                                                                            |
+| `jwt`                  |            | Token for [JWT Authentication](https://docs.nats.io/running-a-nats-service/configuration/securing_nats/auth_intro/jwt). Alternatively you can use [CredentialsParser](#connecting-with-jwt) |
+| `maxReconnectAttempts` | `-1`       | Maximum reconnect attempts per disconnect. Negative = unlimited; `0` throws immediately on disconnect. Only applies when `reconnect` is enabled.                                            |
+| `nkey`                 |            | Ed25519 based public key signature used for [NKEY Authentication](https://docs.nats.io/running-a-nats-service/configuration/securing_nats/auth_intro/nkey_auth).                            |
+| `pass`                 |            | Sets the password for a connection.                                                                                                                                                         |
+| `pedantic`             | `false`    | Turns on strict subject format checks.                                                                                                                                                      |
+| `pingInterval`         | `2`        | Number of seconds between client-sent pings.                                                                                                                                                |
+| `port`                 | `4222`     | Port to connect to (only used if `servers` is not specified).                                                                                                                               |
+| `reconnect`            | `true`     | If true, the client reconnects automatically when the connection is lost.                                                                                                                   |
+| `timeout`              | 1          | Number of seconds the client will wait for a connection to be established.                                                                                                                  |
+| `token`                |            | Sets a authorization token for a connection.                                                                                                                                                |
+| `tlsHandshakeFirst`    | `false`    | If true, the client performs the TLS handshake immediately after connecting, without waiting for the server’s INFO message.                                                                 |
+| `tlsKeyFile`           |            | TLS 1.2 Client key file path.                                                                                                                                                               |
+| `tlsCertFile`          |            | TLS 1.2 Client certificate file path.                                                                                                                                                       |
+| `tlsCaFile`            |            | TLS 1.2 CA certificate filepath.                                                                                                                                                            |
+| `user`                 |            | Sets the username for a connection.                                                                                                                                                         |
+| `verbose`              | `false`    | Turns on `+OK` protocol acknowledgements.                                                                                                                                                   |

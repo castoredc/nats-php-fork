@@ -123,6 +123,29 @@ The certificate is checked against `tlsCaFile`, not against the host name, for
 configured and discovered servers alike. Without `tlsCaFile` it is not checked at
 all.
 
+#### Lame duck mode
+
+A server being taken out of service announces it, then disconnects its clients
+gradually. `lameDuckModeHandler` reports the announcement; like the go, python and
+javascript clients, this one keeps the connection and leaves the decision to the
+application. Call `forceReconnect()` to move to another member, applied at the
+next read or write:
+
+```php
+$configuration = new Configuration(
+    servers: ['one.example.com:4222', 'two.example.com:4222'],
+    lameDuckModeHandler: fn (Client $client) => $client->forceReconnect(),
+);
+```
+
+`forceReconnect()` makes one attempt at each server and throws the connection
+error if none answers, rather than retrying until one does. That keeps the call
+that triggered it from blocking for ever when every member is draining or down.
+
+Doing nothing is also reasonable: the server closes the connection when it is
+ready, and the client then reconnects to another member on its own, having moved
+the draining server to the back of the queue.
+
 ### Connecting with TLS
 Typically, when connecting to a cluster with TLS enabled the connection settings do not change. The client lib will automatically switch over to TLS 1.2. However, if you're using a self-signed certificate you may have to point to your local CA file using the tlsCaFile setting.
 
@@ -503,6 +526,7 @@ The following is the list of configuration options and default values.
 | `ignoreDiscoveredServers` | `false` | Use only the configured servers, ignoring the members a cluster advertises.                                                                                                                 |
 | `inboxPrefix`          | `"_INBOX"` | Sets de prefix for automatically created inboxes                                                                                                                                            |
 | `jwt`                  |            | Token for [JWT Authentication](https://docs.nats.io/running-a-nats-service/configuration/securing_nats/auth_intro/jwt). Alternatively you can use [CredentialsParser](#connecting-with-jwt) |
+| `lameDuckModeHandler`  |            | Called when the connected server announces it is being taken out of service.                                                                                                                |
 | `maxReconnectAttempts` | `-1`       | Maximum failed connection attempts **per server** before that server is dropped from the pool. Negative = unlimited. Once every server is dropped, that recovery attempt gives up and raises the connection error; the next call starts again from the configured servers.                    |
 | `nkey`                 |            | Ed25519 based public key signature used for [NKEY Authentication](https://docs.nats.io/running-a-nats-service/configuration/securing_nats/auth_intro/nkey_auth).                            |
 | `noRandomize`          | `false`    | Connect to the servers in the order configured instead of shuffling them.                                                                                                                   |

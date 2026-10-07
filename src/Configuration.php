@@ -51,6 +51,7 @@ class Configuration
         public float $reconnectWait = 0.2,
         public float $reconnectJitter = 0.1,
         public ?Closure $discoveredServersHandler = null,
+        public ?Closure $lameDuckModeHandler = null,
     ) {
 
         $this->setDelay($delay, $delayMode);

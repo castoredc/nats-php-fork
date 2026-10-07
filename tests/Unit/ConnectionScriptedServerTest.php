@@ -81,6 +81,116 @@ class ConnectionScriptedServerTest extends TestCase
         $server->finish();
     }
 
+    public function testForceReconnectIsHonouredWithAutomaticReconnectionOffAndLogsNoError(): void
+    {
+        $server = ScriptedServer::start(self::ACCEPTING, 2);
+        $logger = $this->recordingLogger();
+
+        $client = $this->client($server->address, ['reconnect' => false]);
+        $client->connection->setLogger($logger);
+
+        $client->connection->sendMessage(new Ping());
+        $client->forceReconnect();
+        $client->connection->sendMessage(new Ping());
+        $client->connection->close();
+
+        $connects = array_filter(
+            $server->finish(),
+            fn (?string $line) => $line !== null && str_starts_with($line, 'CONNECT ')
+        );
+
+        $this->assertCount(2, $connects, 'the requested reconnection has to happen');
+        $this->assertSame([], $logger->records('error'), 'a requested reconnection is not a failure');
+    }
+
+    /**
+     * The failure that stops a requested reconnection is the connection error, not
+     * something made up to stand for it.
+     */
+    public function testForceReconnectReportsTheConnectionErrorWhenNoServerAnswers(): void
+    {
+        $server = ScriptedServer::start(self::ACCEPTING, 1);
+
+        $client = $this->client($server->address, ['maxReconnectAttempts' => 1, 'timeout' => 0.3]);
+        $client->connection->sendMessage(new Ping());
+
+        $client->forceReconnect();
+
+        try {
+            $client->connection->sendMessage(new Ping());
+            $this->fail('nothing is left to reconnect to');
+        } catch (Exception $e) {
+            $this->assertSame(Exception::class, $e::class);
+            $this->assertNotSame('No servers available', $e->getMessage());
+        }
+
+        $server->finish();
+    }
+
+    /**
+     * There is nothing to move off before the first connection, so asking to is
+     * answered by the connection the next write makes anyway, not by a second one.
+     */
+    public function testForceReconnectBeforeTheFirstConnectionConnectsOnce(): void
+    {
+        $server = ScriptedServer::start(self::ACCEPTING, 1);
+
+        $client = $this->client($server->address, ['maxReconnectAttempts' => 1, 'timeout' => 0.5]);
+        $client->forceReconnect();
+        $client->connection->sendMessage(new Ping());
+        $client->connection->close();
+
+        $lines = $server->finish();
+
+        $this->assertCount(
+            1,
+            array_filter($lines, fn (?string $line) => $line !== null && str_starts_with($line, 'CONNECT '))
+        );
+        $this->assertSame('PING', $lines[2], 'the application ping is the first thing sent after the handshake');
+    }
+
+    /**
+     * With the default, unlimited budget a requested reconnect that finds nobody
+     * used to keep sweeping the pool for ever, blocking the publish or process call
+     * that triggered it. It is one pass: the caller asked for a move, and hearing
+     * that none is possible is the answer.
+     */
+    public function testForceReconnectMakesOnePassWhenTheBudgetIsUnlimited(): void
+    {
+        $server = ScriptedServer::start(self::ACCEPTING, 1);
+
+        $attempts = 0;
+        $client = $this->client($server->address, ['timeout' => 0.3]);
+        // Aborts a runaway loop with a failure instead of letting the test hang.
+        $client->connection->setLogger(new class ($attempts) extends AbstractLogger {
+            public function __construct(private int &$attempts)
+            {
+            }
+
+            public function log($level, string|\Stringable $message, array $context = []): void
+            {
+                if (str_contains((string) $message, 'failed:') && ++$this->attempts > 3) {
+                    throw new \RuntimeException('still sweeping after ' . $this->attempts . ' attempts');
+                }
+            }
+        });
+
+        $client->connection->sendMessage(new Ping());
+        $client->forceReconnect();
+
+        try {
+            $client->connection->sendMessage(new Ping());
+            $this->fail('nothing is left to reconnect to');
+        } catch (Exception $e) {
+            $this->assertSame(Exception::class, $e::class);
+            $this->assertStringNotContainsString('still sweeping', $e->getMessage());
+        }
+
+        $this->assertSame(1, $attempts, 'one pass over a one server pool');
+
+        $server->finish();
+    }
+
     /**
      * Dropping a server explains every failure that follows, so it is logged where
      * it happens, with the address and the reason.
@@ -107,6 +217,147 @@ class ConnectionScriptedServerTest extends TestCase
         );
 
         $server->finish();
+    }
+
+    /**
+     * Only the very first connection fills the pool silently, so that starting up
+     * against an assembled cluster reports no discovery. A server met while
+     * reconnecting that names a peer the client has never heard of is news.
+     */
+    public function testServerMetWhileReconnectingIsReportedToTheDiscoveryHandler(): void
+    {
+        $quiet = ScriptedServer::start(self::ACCEPTING);
+
+        $withPeer = 'INFO {"server_id":"B","proto":1,"max_payload":1048576,"connect_urls":["127.0.0.1:4998"]}' . "\r\n";
+        $joined = ScriptedServer::start([
+            ['send', $withPeer],
+            ['read'],
+            ['read'],
+            ['send', "PONG\r\n"],
+            ['read'],
+        ]);
+
+        $notified = [];
+        $client = $this->clusterClient([$quiet->address, $joined->address], [
+            'discoveredServersHandler' => function () use (&$notified) {
+                $notified[] = 'discovered';
+            },
+        ]);
+
+        $client->connection->sendMessage(new Ping());
+        $this->assertSame([], $notified, 'the first connection is silent');
+
+        $client->forceReconnect();
+        $client->connection->sendMessage(new Ping());
+
+        $this->assertSame(['discovered'], $notified);
+        $this->assertContains('nats://127.0.0.1:4998', $client->connection->getDiscoveredServers());
+
+        $client->connection->close();
+        $quiet->finish();
+        $joined->finish();
+    }
+
+    /**
+     * A lame duck notice between CONNECT and PONG used to be dropped, and the pool
+     * forgot the server was draining once the connection was confirmed.
+     */
+    public function testLameDuckNoticeBeforeThePongIsReported(): void
+    {
+        $quiet = ScriptedServer::start(self::ACCEPTING);
+
+        $draining = ScriptedServer::start([
+            ['send', self::INFO],
+            ['read'],
+            ['read'],
+            ['send', 'INFO {"server_id":"B","proto":1,"max_payload":2048,"ldm":true}' . "\r\n"],
+            ['send', "PONG\r\n"],
+            ['read'],
+        ]);
+
+        $notified = [];
+        $client = $this->clusterClient([$quiet->address, $draining->address], [
+            'lameDuckModeHandler' => function () use (&$notified) {
+                $notified[] = 'draining';
+            },
+        ]);
+
+        $client->connection->sendMessage(new Ping());
+        $client->forceReconnect();
+        $client->connection->sendMessage(new Ping());
+
+        $this->assertSame(['draining'], $notified);
+        $this->assertTrue($client->connection->getPool()->current()->draining);
+        $this->assertSame(2048, $client->connection->getInfoMessage()->max_payload, 'the later INFO is merged');
+
+        $client->connection->close();
+        $quiet->finish();
+        $draining->finish();
+    }
+
+    /**
+     * The handler runs once the connection is up, not in the middle of the
+     * handshake: a handler that publishes, as one asking to migrate might, would
+     * otherwise write to a connection that has not sent CONNECT yet.
+     */
+    public function testNotificationsWaitForTheHandshakeToFinish(): void
+    {
+        $quiet = ScriptedServer::start(self::ACCEPTING);
+        $draining = ScriptedServer::start([
+            ['send', 'INFO {"server_id":"B","proto":1,"max_payload":1048576,"ldm":true}' . "\r\n"],
+            ['read'],
+            ['read'],
+            ['send', "PONG\r\n"],
+            ['read'],
+        ]);
+
+        $connecting = null;
+        $client = $this->clusterClient([$quiet->address, $draining->address]);
+        $connection = $client->connection;
+        $client->configuration->lameDuckModeHandler = function () use (&$connecting, $connection) {
+            $property = new \ReflectionProperty($connection, 'connecting');
+            $connecting = $property->getValue($connection);
+        };
+
+        $connection->sendMessage(new Ping());
+        $client->forceReconnect();
+        $connection->sendMessage(new Ping());
+
+        $this->assertFalse($connecting, 'the handler ran after the handshake, not during it');
+
+        $connection->close();
+        $quiet->finish();
+        $draining->finish();
+    }
+
+    /**
+     * An opening INFO that already says draining is not a transition on the very
+     * first connection, as in the go and python clients.
+     */
+    public function testFirstConnectionToADrainingServerIsSilent(): void
+    {
+        $draining = ScriptedServer::start([
+            ['send', 'INFO {"server_id":"B","proto":1,"max_payload":1048576,"ldm":true}' . "\r\n"],
+            ['read'],
+            ['read'],
+            ['send', "PONG\r\n"],
+            ['read'],
+        ]);
+
+        $notified = [];
+        $client = $this->clusterClient([$draining->address], [
+            'lameDuckModeHandler' => function () use (&$notified) {
+                $notified[] = 'draining';
+            },
+        ]);
+
+        $client->connection->sendMessage(new Ping());
+
+        $this->assertSame([], $notified);
+        $this->assertTrue($client->connection->getInfoMessage()->ldm, 'it is still visible on the INFO');
+
+        $client->connection->close();
+        $draining->finish();
     }
 
     /**
@@ -161,59 +412,6 @@ class ConnectionScriptedServerTest extends TestCase
 
         $this->assertGreaterThanOrEqual(0.2, $elapsed, 'it waited between the two passes');
         $this->assertLessThan(0.9, $elapsed, 'and not after every attempt');
-    }
-
-    /**
-     * Only the very first connection fills the pool silently, so that starting up
-     * against an assembled cluster reports no discovery. A server met while
-     * reconnecting that names a peer the client has never heard of is news.
-     */
-    public function testServerMetWhileReconnectingIsReportedToTheDiscoveryHandler(): void
-    {
-        $quiet = ScriptedServer::start(self::ACCEPTING);
-
-        $withPeer = 'INFO {"server_id":"B","proto":1,"max_payload":1048576,"connect_urls":["127.0.0.1:4998"]}' . "\r\n";
-        $joined = ScriptedServer::start([
-            ['send', $withPeer],
-            ['read'],
-            ['read'],
-            ['send', "PONG\r\n"],
-            ['read'],
-        ]);
-
-        $notified = [];
-        $client = $this->clusterClient([$quiet->address, $joined->address], [
-            'discoveredServersHandler' => function () use (&$notified) {
-                $notified[] = 'discovered';
-            },
-        ]);
-
-        $client->connection->sendMessage(new Ping());
-        $this->assertSame([], $notified, 'the first connection is silent');
-
-        $this->dropConnection($client);
-        $client->connection->sendMessage(new Ping());
-
-        $this->assertSame(['discovered'], $notified);
-        $this->assertContains('nats://127.0.0.1:4998', $client->connection->getDiscoveredServers());
-
-        $client->connection->close();
-        $quiet->finish();
-        $joined->finish();
-    }
-
-    /**
-     * Replaces the socket with one whose peer has gone, which is what the client sees
-     * when a server dies.
-     */
-    private function dropConnection(Client $client): void
-    {
-        [$clientEnd, $serverEnd] = stream_socket_pair(STREAM_PF_UNIX, STREAM_SOCK_STREAM, 0);
-        fclose($serverEnd);
-
-        $socket = new \ReflectionProperty($client->connection, 'socket');
-        fclose($socket->getValue($client->connection));
-        $socket->setValue($client->connection, $clientEnd);
     }
 
     private function clusterClient(array $servers, array $options = []): Client

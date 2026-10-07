@@ -19,6 +19,13 @@ services:
     depends_on:
       credentials-generator:
         condition: service_completed_successfully
+  nats-with-auth:
+    image: nats:$NATS_IMAGE_TAG
+    restart: unless-stopped
+    ports:
+      - "4224:4222"
+      - "8224:8222"
+    command: -js -m 8222 --user ruser --pass T0pS3cr3t
   nats-with-certs:
     image: nats:$NATS_IMAGE_TAG
     restart: unless-stopped

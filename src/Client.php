@@ -110,6 +110,18 @@ class Client
         return $this->connection->ping();
     }
 
+    /** @return string[] every server the client may use, without credentials */
+    public function getServers(): array
+    {
+        return $this->connection->getServers();
+    }
+
+    /** @return string[] only the servers learned from the cluster */
+    public function getDiscoveredServers(): array
+    {
+        return $this->connection->getDiscoveredServers();
+    }
+
     public function publish(string $name, mixed $payload, ?string $replyTo = null): self
     {
         $this->connection->sendMessage(new Publish([

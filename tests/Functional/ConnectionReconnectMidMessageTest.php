@@ -119,12 +119,17 @@ class ConnectionReconnectMidMessageTest extends TestCase
     /**
      * Minimal scripted NATS server.
      *
-     * Connection 1: send INFO, read the CONNECT handshake and the first few
-     * bytes of the PUB command, then slam the socket shut to force the client's
-     * write to fail mid-message.
+     * Connection 1: send INFO, read the CONNECT and PING handshake and answer it,
+     * read the first few bytes of the PUB command, then slam the socket shut to
+     * force the client's write to fail mid-message.
      *
-     * Connection 2 (the reconnect): send INFO, swallow the CONNECT handshake,
-     * then record every remaining byte — those are the bytes the client resends.
+     * Connection 2 (the reconnect): send INFO, swallow and answer the CONNECT and
+     * PING handshake, then record every remaining byte — those are the bytes the
+     * client resends.
+     *
+     * The client confirms a connection with a PING before using it, as it has to
+     * against a real server, so a server that never answers is not one it can
+     * connect to.
      */
     private function runFakeServer($server, string $resultFile, int $port): void
     {
@@ -148,10 +153,11 @@ class ConnectionReconnectMidMessageTest extends TestCase
         }
         @fwrite($c1, $info);
 
-        // Read until the CONNECT line has ended (\r\n) and at least a few bytes
-        // of the following PUB command have arrived, so the client is provably
-        // mid-PUB (its $total > 0) before we cut the socket.
+        // Read the CONNECT and PING lines and answer the PING, then wait until at
+        // least a few bytes of the following PUB command have arrived, so the client
+        // is provably mid-PUB (its $total > 0) before we cut the socket.
         $buf = '';
+        $answered = false;
         $deadline = microtime(true) + 5;
         while (microtime(true) < $deadline) {
             $b = @fread($c1, 4096);
@@ -163,8 +169,17 @@ class ConnectionReconnectMidMessageTest extends TestCase
                 continue;
             }
             $buf .= $b;
-            $crlf = strpos($buf, "\r\n");
-            if ($crlf !== false && strlen($buf) >= $crlf + 2 + 4) {
+
+            $first = strpos($buf, "\r\n");
+            $second = $first === false ? false : strpos($buf, "\r\n", $first + 2);
+            if ($second === false) {
+                continue;
+            }
+            if (!$answered) {
+                @fwrite($c1, "PONG\r\n");
+                $answered = true;
+            }
+            if (strlen($buf) >= $second + 2 + 4) {
                 break;
             }
         }
@@ -178,10 +193,11 @@ class ConnectionReconnectMidMessageTest extends TestCase
         }
         @fwrite($c2, $info);
 
-        // Swallow the CONNECT handshake line (everything up to its \r\n).
+        // Swallow the CONNECT and PING lines (everything up to the second \r\n),
+        // one byte at a time so nothing of the message that follows is consumed.
         $handshake = '';
         $deadline = microtime(true) + 5;
-        while (strpos($handshake, "\r\n") === false && microtime(true) < $deadline) {
+        while (substr_count($handshake, "\r\n") < 2 && microtime(true) < $deadline) {
             $b = @fread($c2, 1);
             if ($b === '' || $b === false) {
                 if (feof($c2)) {
@@ -192,7 +208,8 @@ class ConnectionReconnectMidMessageTest extends TestCase
             }
             $handshake .= $b;
         }
-        $rest = substr($handshake, strpos($handshake, "\r\n") + 2);
+        @fwrite($c2, "PONG\r\n");
+        $rest = '';
 
         // Everything after the handshake is the resent message. We only need the
         // first bytes for the assertion, but we must keep draining the socket to

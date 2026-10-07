@@ -198,17 +198,18 @@ class ConnectionTest extends FunctionalTestCase
         $client = $this->createClient();
         $config = $client->configuration;
 
-        // Set a very short timeout
         $originalTimeout = $config->timeout;
-        $config->timeout = 0.001;
+        // Short, but long enough for the handshake to complete. A timeout the
+        // handshake cannot meet is never satisfied by retrying, so with the default
+        // unlimited attempts this spins forever rather than failing.
+        $config->timeout = 0.05;
 
-        // Try to process with short timeout
-        $client->process(0.001);
+        // Nothing has been published, so a short read finds nothing and says so.
+        $this->assertNull($client->process(0.05));
 
-        // Restore timeout
         $config->timeout = $originalTimeout;
 
-        $this->assertTrue(true);
+        $this->assertTrue($client->ping(), 'the connection is still usable');
     }
 
     public function testPongMessageHandling(): void

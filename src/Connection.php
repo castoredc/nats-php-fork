@@ -21,6 +21,9 @@ use Exception;
 
 class Connection
 {
+    /** Refuse to buffer a single protocol line larger than this. */
+    private const CONTROL_LINE_LIMIT = 1_048_576;
+
     private $socket;
     private $context;
 
@@ -100,8 +103,15 @@ class Connection
             }
 
             $message = null;
-            $line = stream_get_line($this->socket, 1024, "\r\n");
+            $line = $this->readLine();
             $now = microtime(true);
+
+            if ($line === false && $timeout === 0 && !feof($this->socket)) {
+                // Only part of a line has arrived. It stays buffered, so selecting
+                // again would report it readable and spin until the rest comes. A
+                // closed socket is left to the check at the top of the loop.
+                break;
+            }
             if ($line) {
                 $message = Factory::create($line);
                 $this->activityAt = $now;
@@ -294,6 +304,35 @@ class Connection
         if (!stream_socket_enable_crypto($this->socket, true, STREAM_CRYPTO_METHOD_TLSv1_2_CLIENT)) {
             throw new Exception('Failed to connect: Error enabling TLS');
         }
+    }
+
+    /**
+     * Reads a single protocol control line.
+     *
+     * Asks for the whole line in one call. stream_get_line() only recognises a
+     * multi byte delimiter when both bytes fit in the window it was given, so a
+     * line one byte short of a multiple of a small window would be returned with its
+     * "\r" on the end and the "\n" left to be read as the start of the next line.
+     * A clustered INFO naming many servers is easily long enough to meet that.
+     *
+     * @return string|false false when nothing was read
+     */
+    private function readLine(): string|false
+    {
+        $line = stream_get_line($this->socket, self::CONTROL_LINE_LIMIT, "\r\n");
+
+        if ($line !== false && strlen($line) >= self::CONTROL_LINE_LIMIT) {
+            // What is left of the line cannot be told from the start of the next one,
+            // so the connection is dropped and the next read reconnects.
+            $this->close();
+
+            throw new LogicException(sprintf(
+                'Protocol line exceeds the %d byte limit',
+                self::CONTROL_LINE_LIMIT
+            ));
+        }
+
+        return $line;
     }
 
     protected function getPayload(int $length): string

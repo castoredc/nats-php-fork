@@ -36,9 +36,25 @@ class Info extends Prototype
     public ?string $nonce;
     public ?string $xkey;
     public ?int $api_lvl;
+    public ?bool $connect_info;
+    public ?string $remote_account;
 
     public function render(): string
     {
         return 'INFO ' . json_encode($this);
+    }
+
+    /**
+     * The server owns the shape of this message and adds fields between releases,
+     * so an unrecognised one is ignored. Rejecting it would break the client
+     * against every newer server: advertising protocol level 1 already brings back
+     * connect_info and remote_account, and there will be more.
+     *
+     * Ignored fields are absent from render(), which only reproduces what this
+     * class declares.
+     */
+    protected function ignoresUnknownProperties(): bool
+    {
+        return true;
     }
 }

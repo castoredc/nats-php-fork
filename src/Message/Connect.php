@@ -10,14 +10,14 @@ class Connect extends Prototype
     public bool $pedantic;
     public bool $verbose;
     public string $auth_token;
-    public string $echo;
+    public bool $echo;
     public string $jwt;
     public string $lang;
     public string $name;
     public string $pass;
-    public string $protocol;
+    public int $protocol;
     public string $sig;
-    public string $tls_required;
+    public bool $tls_required;
     public string $user;
     public string $version;
     public string $nkey;

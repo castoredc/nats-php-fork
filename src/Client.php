@@ -110,6 +110,18 @@ class Client
         return $this->connection->ping();
     }
 
+    /**
+     * Moves the connection to another server in the pool, applied at the next read
+     * or write. This is how an application migrates off a server that announced
+     * lame duck mode, from inside the lameDuckModeHandler.
+     */
+    public function forceReconnect(): self
+    {
+        $this->connection->forceReconnect();
+
+        return $this;
+    }
+
     /** @return string[] every server the client may use, without credentials */
     public function getServers(): array
     {

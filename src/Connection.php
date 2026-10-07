@@ -33,6 +33,9 @@ class Connection
     /** Guards the handshake against re-entering the reconnect loop. */
     private bool $connecting = false;
 
+    /** Set by forceReconnect(), acted on at the next read or write. */
+    private bool $reconnectRequested = false;
+
     /** True once any connection has been established, as opposed to attempted. */
     private bool $hasConnected = false;
 
@@ -121,6 +124,8 @@ class Connection
         if ($timeout === null) {
             $timeout = $this->config->timeout;
         }
+
+        $this->applyRequestedReconnect();
 
         $now = microtime(true);
         $max = $timeout > 0 ? $now + $timeout : PHP_FLOAT_MAX;
@@ -251,6 +256,9 @@ class Connection
 
     public function sendMessage(Message $message): void
     {
+        // Before init(), so that a request made while there is no connection is
+        // answered by the connection init() is about to make, not by a second one.
+        $this->applyRequestedReconnect();
         $this->init();
 
         while (true) {
@@ -653,6 +661,23 @@ class Connection
             $notifications[] = fn () => $this->invokeHandler($this->config->discoveredServersHandler);
         }
 
+        if ($info->ldm ?? false) {
+            // Checked when delivered rather than now: a connection that is still being
+            // confirmed has not marked its server as connected yet, which clears the
+            // draining flag, and the flag is what makes this edge triggered.
+            $notifications[] = function () {
+                $server = $this->getPool()->current();
+
+                if ($server === null || $server->draining) {
+                    return;
+                }
+
+                $server->draining = true;
+                $this->logger?->info('server entered lame duck mode: ' . $server->getAddress());
+                $this->invokeHandler($this->config->lameDuckModeHandler);
+            };
+        }
+
         if ($this->connecting) {
             // A handler that publishes, as one asking to migrate might, would write
             // to a connection that has not sent CONNECT yet.
@@ -702,6 +727,55 @@ class Connection
                 trigger_error($message, E_USER_WARNING);
             }
         }
+    }
+
+    /**
+     * Asks for the connection to be moved to another server.
+     *
+     * Deferred to the next read or write rather than done here, because the way to
+     * migrate off a draining server is to call this from the lame duck handler,
+     * which runs inside the read that delivered the notification. Reconnecting from
+     * there would tear down the call stack still processing that message.
+     *
+     * Applies whatever the reconnect option says, that one governing whether the
+     * client recovers on its own rather than whether it does as it is told. If no
+     * server can be reached, the failure raised is the connection error itself.
+     */
+    public function forceReconnect(): void
+    {
+        $this->reconnectRequested = true;
+    }
+
+    private function applyRequestedReconnect(): void
+    {
+        if (!$this->reconnectRequested || $this->connecting) {
+            return;
+        }
+
+        $this->reconnectRequested = false;
+
+        // Nothing to move off yet: the next connection picks a server regardless.
+        if (!is_resource($this->socket)) {
+            return;
+        }
+
+        $this->logger?->debug(
+            'reconnecting on request, leaving ' . $this->getPool()->current()?->getAddress()
+        );
+
+        // Deliberately not routed through processException(): this is a requested
+        // operation rather than a failure. Handing it a synthetic exception logged
+        // an error for an ordinary event, refused to run at all when automatic
+        // reconnection was disabled, and, once the pool was exhausted, reported
+        // that synthetic exception as the cause in place of the connection errors
+        // that actually stopped it.
+        //
+        // A single pass, however the budget is set. This is a call the application is
+        // waiting on, and with an unlimited budget sweeping until something answers
+        // would never return when nothing does. Recovering from a lost connection is
+        // the job of the failure path; here the answer to "move me" can be "no".
+        $this->getPool()->next();
+        $this->connect(retry: false);
     }
 
     /**

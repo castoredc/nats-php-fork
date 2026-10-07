@@ -63,23 +63,72 @@ class AsyncInfoTest extends TestCase
     }
 
     /**
+     * Lame duck mode is a notification. The go, python and javascript clients all
+     * keep the connection and wait for the server to close it, leaving the decision
+     * to migrate to the application.
+     */
+    public function testLameDuckModeNotifiesAndKeepsTheConnection(): void
+    {
+        $notified = [];
+        $client = $this->client([
+            'lameDuckModeHandler' => function (Client $client) use (&$notified) {
+                $notified[] = $client->connection->getPool()->current()->getAddress();
+            },
+        ]);
+
+        $this->deliver($client, ['ldm' => true]);
+
+        $this->assertSame(['localhost:4222'], $notified);
+        $this->assertTrue($client->connection->getPool()->current()->draining);
+
+        $socket = new ReflectionProperty(Connection::class, 'socket');
+        $this->assertTrue(is_resource($socket->getValue($client->connection)));
+    }
+
+    public function testLameDuckModeNotifiesOnlyOnTheTransition(): void
+    {
+        $calls = 0;
+        $client = $this->client([
+            'lameDuckModeHandler' => function () use (&$calls) {
+                $calls++;
+            },
+        ]);
+
+        $this->deliver($client, ['ldm' => true]);
+        $this->deliver($client, ['ldm' => true]);
+
+        $this->assertSame(1, $calls, 'the server repeats the flag on every later update');
+    }
+
+    public function testNoLameDuckNotificationWithoutTheFlag(): void
+    {
+        $calls = 0;
+        $client = $this->client([
+            'lameDuckModeHandler' => function () use (&$calls) {
+                $calls++;
+            },
+        ]);
+
+        $this->deliver($client, ['connect_urls' => ['b.example.com:4222']]);
+
+        $this->assertSame(0, $calls);
+    }
+
+    /**
      * A handler runs inline on the read that delivered the update, so it must not be
      * able to take the connection down.
      */
     public function testThrowingHandlerIsContained(): void
     {
         $client = $this->client([
-            'servers' => ['a.example.com:4222'],
-            'discoveredServersHandler' => function () {
+            'lameDuckModeHandler' => function () {
                 throw new \RuntimeException('handler exploded');
             },
         ]);
 
-        $warnings = $this->collectingWarnings(
-            fn () => $this->deliver($client, ['connect_urls' => ['b.example.com:4222']])
-        );
+        $warnings = $this->collectingWarnings(fn () => $this->deliver($client, ['ldm' => true]));
 
-        $this->assertSame(['nats://b.example.com:4222'], $client->getDiscoveredServers());
+        $this->assertTrue($client->connection->getPool()->current()->draining);
         $this->assertCount(1, $warnings);
     }
 
@@ -108,8 +157,7 @@ class AsyncInfoTest extends TestCase
     {
         $logged = [];
         $client = $this->client([
-            'servers' => ['a.example.com:4222'],
-            'discoveredServersHandler' => function () {
+            'lameDuckModeHandler' => function () {
                 throw new \RuntimeException('handler exploded');
             },
         ]);
@@ -124,9 +172,7 @@ class AsyncInfoTest extends TestCase
             }
         });
 
-        $warnings = $this->collectingWarnings(
-            fn () => $this->deliver($client, ['connect_urls' => ['b.example.com:4222']])
-        );
+        $warnings = $this->collectingWarnings(fn () => $this->deliver($client, ['ldm' => true]));
 
         $this->assertSame([], $warnings, 'a logger is the place for it, no warning as well');
         $this->assertContains(['error', 'handler failed: handler exploded'], $logged);
@@ -147,6 +193,25 @@ class AsyncInfoTest extends TestCase
 
         $this->assertSame(['nats://a.example.com:4222'], $client->getServers());
         $this->assertSame(0, $calls);
+    }
+
+    /**
+     * The lame duck flag still gets through when discovery is switched off, since
+     * the two are unrelated concerns carried on the same message.
+     */
+    public function testLameDuckModeStillNotifiesWhenDiscoveryIsIgnored(): void
+    {
+        $calls = 0;
+        $client = $this->client([
+            'ignoreDiscoveredServers' => true,
+            'lameDuckModeHandler' => function () use (&$calls) {
+                $calls++;
+            },
+        ]);
+
+        $this->deliver($client, ['ldm' => true, 'connect_urls' => ['b.example.com:4222']]);
+
+        $this->assertSame(1, $calls);
     }
 
     /**

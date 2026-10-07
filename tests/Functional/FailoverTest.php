@@ -144,6 +144,65 @@ class FailoverTest extends FunctionalTestCase
         $this->assertTrue($client->connection->getPool()->current()?->authenticationFailed ?? false);
     }
 
+    public function testForceReconnectEstablishesANewConnection(): void
+    {
+        $client = $this->createClient([
+            'servers' => [$this->live()],
+            'reconnectWait' => 0.0,
+            'reconnectJitter' => 0.0,
+        ]);
+        $client->ping();
+
+        $socket = new ReflectionProperty(Connection::class, 'socket');
+        $before = (int) $socket->getValue($client->connection);
+
+        $client->forceReconnect();
+
+        $this->assertTrue($client->ping());
+        $this->assertNotSame($before, (int) $socket->getValue($client->connection));
+    }
+
+    /**
+     * The documented way to leave a draining server: the lame duck handler asks for
+     * a reconnect, which is applied at the next read or write rather than unwinding
+     * the read that delivered the notification.
+     */
+    public function testLameDuckHandlerCanMigrateOffTheDrainingServer(): void
+    {
+        $client = $this->createClient([
+            'servers' => [$this->live()],
+            'reconnectWait' => 0.0,
+            'reconnectJitter' => 0.0,
+            'lameDuckModeHandler' => fn (Client $client) => $client->forceReconnect(),
+        ]);
+        $client->ping();
+
+        $socket = new ReflectionProperty(Connection::class, 'socket');
+        $before = (int) $socket->getValue($client->connection);
+
+        // Stand in for the draining server and announce it.
+        [$clientEnd, $serverEnd] = stream_socket_pair(STREAM_PF_UNIX, STREAM_SOCK_STREAM, 0);
+        fwrite($serverEnd, 'INFO {"ldm":true}' . "\r\n");
+        $socket->setValue($client->connection, $clientEnd);
+
+        $client->connection->getMessage(0);
+
+        $this->assertTrue(
+            $client->connection->getPool()->current()->draining,
+            'the server has to be recorded as draining'
+        );
+
+        // Applied here, on the next use of the connection.
+        $this->assertTrue($client->ping());
+        $this->assertNotSame($before, (int) $socket->getValue($client->connection));
+        $this->assertFalse(
+            $client->connection->getPool()->current()->draining,
+            'a fresh connection is not draining'
+        );
+
+        fclose($serverEnd);
+    }
+
     public function tearDown(): void
     {
         // The inherited teardown talks to the server, which these clients cannot.

@@ -136,7 +136,7 @@ class ClusterTest extends FunctionalTestCase
 
         $before = $publisher->connection->getPool()->current()->getAddress();
 
-        $this->dropConnection($publisher);
+        $publisher->forceReconnect();
         $publisher->publish($subject, 'after failover');
 
         // The cluster routes the message whichever node the publisher is on, so
@@ -152,6 +152,41 @@ class ClusterTest extends FunctionalTestCase
 
         $subscriber->disconnect();
         $publisher->disconnect();
+    }
+
+    /**
+     * Node three is signalled into lame duck mode, which makes it announce the
+     * transition and then drain its clients. It is restarted afterwards, so this
+     * test owns that node.
+     */
+    public function testLameDuckModeIsAnnouncedByTheServer(): void
+    {
+        if (!$this->dockerAvailable()) {
+            $this->markTestSkipped('docker compose is needed to signal a server into lame duck mode');
+        }
+
+        $notified = [];
+        $client = $this->clusterClient(
+            [self::NODES[3]['client']],
+            ['lameDuckModeHandler' => function (Client $client) use (&$notified) {
+                $notified[] = $client->connection->getPool()->current()->getAddress();
+            }]
+        );
+        $client->ping();
+
+        $this->signalLameDuckMode(3);
+
+        $threshold = microtime(true) + 10;
+        while ($notified === [] && microtime(true) < $threshold) {
+            try {
+                $client->process(0.2);
+            } catch (\Throwable) {
+                // The server drains the connection once it is in lame duck mode.
+                break;
+            }
+        }
+
+        $this->assertSame([self::NODES[3]['client']], $notified);
     }
 
     public function tearDown(): void
@@ -261,5 +296,30 @@ class ClusterTest extends FunctionalTestCase
         }
 
         $this->markTestSkipped($reason);
+    }
+
+    private function dockerAvailable(): bool
+    {
+        exec('docker compose version 2>/dev/null', $output, $status);
+
+        return $status === 0;
+    }
+
+    private function signalLameDuckMode(int $node): void
+    {
+        $directory = escapeshellarg($this->getProjectRoot() . '/docker');
+        $service = escapeshellarg("nats-cluster-$node");
+
+        exec("docker compose --project-directory $directory kill -s SIGUSR2 $service 2>&1", $output, $status);
+
+        if ($status !== 0) {
+            $this->markTestSkipped('Could not signal the server: ' . implode("\n", $output));
+        }
+
+        // Restored for the rest of the suite: a server stays in lame duck mode until
+        // it is restarted, and stops accepting connections while it is.
+        register_shutdown_function(static function () use ($directory, $service) {
+            exec("docker compose --project-directory $directory restart $service 2>&1");
+        });
     }
 }

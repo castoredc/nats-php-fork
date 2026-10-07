@@ -163,6 +163,59 @@ class ConnectionScriptedServerTest extends TestCase
         $this->assertLessThan(0.9, $elapsed, 'and not after every attempt');
     }
 
+    /**
+     * Only the very first connection fills the pool silently, so that starting up
+     * against an assembled cluster reports no discovery. A server met while
+     * reconnecting that names a peer the client has never heard of is news.
+     */
+    public function testServerMetWhileReconnectingIsReportedToTheDiscoveryHandler(): void
+    {
+        $quiet = ScriptedServer::start(self::ACCEPTING);
+
+        $withPeer = 'INFO {"server_id":"B","proto":1,"max_payload":1048576,"connect_urls":["127.0.0.1:4998"]}' . "\r\n";
+        $joined = ScriptedServer::start([
+            ['send', $withPeer],
+            ['read'],
+            ['read'],
+            ['send', "PONG\r\n"],
+            ['read'],
+        ]);
+
+        $notified = [];
+        $client = $this->clusterClient([$quiet->address, $joined->address], [
+            'discoveredServersHandler' => function () use (&$notified) {
+                $notified[] = 'discovered';
+            },
+        ]);
+
+        $client->connection->sendMessage(new Ping());
+        $this->assertSame([], $notified, 'the first connection is silent');
+
+        $this->dropConnection($client);
+        $client->connection->sendMessage(new Ping());
+
+        $this->assertSame(['discovered'], $notified);
+        $this->assertContains('nats://127.0.0.1:4998', $client->connection->getDiscoveredServers());
+
+        $client->connection->close();
+        $quiet->finish();
+        $joined->finish();
+    }
+
+    /**
+     * Replaces the socket with one whose peer has gone, which is what the client sees
+     * when a server dies.
+     */
+    private function dropConnection(Client $client): void
+    {
+        [$clientEnd, $serverEnd] = stream_socket_pair(STREAM_PF_UNIX, STREAM_SOCK_STREAM, 0);
+        fclose($serverEnd);
+
+        $socket = new \ReflectionProperty($client->connection, 'socket');
+        fclose($socket->getValue($client->connection));
+        $socket->setValue($client->connection, $clientEnd);
+    }
+
     private function clusterClient(array $servers, array $options = []): Client
     {
         return new Client(new Configuration($options + [

@@ -16,6 +16,7 @@ use Basis\Nats\Message\Publish;
 use Basis\Nats\Message\Pong;
 use Basis\Nats\Message\Prototype as Message;
 use Basis\Nats\Message\Subscribe;
+use Closure;
 use LogicException;
 use Psr\Log\LoggerInterface;
 use Throwable;
@@ -31,6 +32,20 @@ class Connection
 
     /** Guards the handshake against re-entering the reconnect loop. */
     private bool $connecting = false;
+
+    /** True once any connection has been established, as opposed to attempted. */
+    private bool $hasConnected = false;
+
+    /** True from the start of a handshake until its opening INFO has been seen. */
+    private bool $awaitingOpeningInfo = false;
+
+    /**
+     * Notifications raised while a handshake is still running, delivered once it has
+     * finished.
+     *
+     * @var Closure[]
+     */
+    private array $pendingNotifications = [];
 
     private float $activityAt = 0;
     private float $pingAt = 0;
@@ -191,7 +206,16 @@ class Connection
                     }
                     $this->processInfo($message);
 
-                    return $message;
+                    // Only the handshake is waiting for an INFO. Every later one is
+                    // an asynchronous topology update that the client acts on
+                    // itself, so returning it would hand application code a message
+                    // it never asked for, and would consume the read that the caller
+                    // meant for its own reply.
+                    if ($this->connecting) {
+                        return $message;
+                    }
+
+                    continue;
                 }
             } elseif ($this->activityAt && $this->activityAt + $this->config->timeout < $now) {
                 if ($this->pingAt && $this->pingAt + $this->config->pingInterval < $now) {
@@ -332,6 +356,7 @@ class Connection
                 // completes its handshake, and then unwinds back into this one,
                 // which carries on against a socket already connected elsewhere.
                 $this->connecting = true;
+                $this->pendingNotifications = [];
 
                 try {
                     $this->handshake($server);
@@ -339,9 +364,13 @@ class Connection
                     $this->connecting = false;
                 }
 
+                $this->hasConnected = true;
+                $this->deliverPendingNotifications();
+
                 return;
             } catch (Throwable $error) {
                 $failure = $error;
+                $this->pendingNotifications = [];
                 $pool->markFailed($server, $error);
 
                 // A socket that opened but never finished its handshake has no
@@ -394,6 +423,7 @@ class Connection
         // to a tls port, or make the liveness check fire immediately and reconnect
         // in a loop.
         $this->resetConnectionState();
+        $this->awaitingOpeningInfo = true;
 
         $flags = STREAM_CLIENT_CONNECT;
         $this->context = stream_context_create();
@@ -591,11 +621,105 @@ class Connection
     }
 
     /**
-     * Applies the cluster topology an INFO message advertises to the pool.
+     * Applies an INFO message: the cluster topology it advertises, and the fields it
+     * refreshes on the connection.
      */
     private function processInfo(Info $info): void
     {
-        $this->getPool()->processInfo($info, $this->tlsEnabled);
+        // The opening INFO of a connection is assigned wholesale by handshake()
+        // itself, against a connection that has no previous state to keep. Every
+        // INFO after it, including one that arrives before the PONG, is an update.
+        $opening = $this->awaitingOpeningInfo;
+        $this->awaitingOpeningInfo = false;
+
+        if (!$opening) {
+            $this->mergeInfoMessage($info);
+        }
+
+        $update = $this->getPool()->processInfo($info, $this->tlsEnabled);
+
+        // The first connection fills the pool silently, so a client that starts up
+        // against an assembled cluster is not told about a discovery it never made,
+        // and a server already draining is not announced as having just started to.
+        // Both match the go and python clients. Anything met while reconnecting is
+        // news, though.
+        if ($this->connecting && !$this->hasConnected) {
+            return;
+        }
+
+        $notifications = [];
+
+        if ($update->hasNew) {
+            $notifications[] = fn () => $this->invokeHandler($this->config->discoveredServersHandler);
+        }
+
+        if ($this->connecting) {
+            // A handler that publishes, as one asking to migrate might, would write
+            // to a connection that has not sent CONNECT yet.
+            array_push($this->pendingNotifications, ...$notifications);
+
+            return;
+        }
+
+        foreach ($notifications as $notification) {
+            $notification();
+        }
+    }
+
+    private function deliverPendingNotifications(): void
+    {
+        $pending = $this->pendingNotifications;
+        $this->pendingNotifications = [];
+
+        foreach ($pending as $notification) {
+            $notification();
+        }
+    }
+
+    /**
+     * Runs a configured handler.
+     *
+     * A synchronous client has no callback loop to hand these to, so they run inline
+     * on the read that delivered the update. A handler that throws must not take
+     * down the connection that was reading.
+     */
+    private function invokeHandler(?Closure $handler): void
+    {
+        if ($handler === null) {
+            return;
+        }
+
+        try {
+            $handler($this->client);
+        } catch (Throwable $e) {
+            $message = 'handler failed: ' . $e->getMessage();
+
+            // Without a logger there would be no trace at all, and a lame duck
+            // handler that threw before asking to migrate would simply never migrate.
+            if ($this->logger !== null) {
+                $this->logger->error($message, ['exception' => $e]);
+            } else {
+                trigger_error($message, E_USER_WARNING);
+            }
+        }
+    }
+
+    /**
+     * Merged rather than replaced, because an asynchronous INFO carries only some of
+     * the fields. Replacing would turn a property that callers read directly, such
+     * as tls_required, back into an uninitialized one, and reading that is an Error.
+     */
+    private function mergeInfoMessage(Info $info): void
+    {
+        if (!isset($this->infoMessage)) {
+            $this->infoMessage = $info;
+
+            return;
+        }
+
+        foreach (get_object_vars($info) as $property => $value) {
+            $this->infoMessage->$property = $value;
+        }
     }
 
     /**

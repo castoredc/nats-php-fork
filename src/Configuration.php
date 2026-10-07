@@ -4,6 +4,7 @@ declare(strict_types=1);
 
 namespace Basis\Nats;
 
+use Closure;
 use InvalidArgumentException;
 
 class Configuration
@@ -49,6 +50,7 @@ class Configuration
         public bool $ignoreDiscoveredServers = false,
         public float $reconnectWait = 0.2,
         public float $reconnectJitter = 0.1,
+        public ?Closure $discoveredServersHandler = null,
     ) {
 
         $this->setDelay($delay, $delayMode);
@@ -75,6 +77,10 @@ class Configuration
             'verbose' => $this->verbose,
             'version' => $this->version,
             'headers' => true,
+            // Protocol level 1 is what makes the server push asynchronous INFO
+            // updates, which is how cluster topology changes and lame duck mode
+            // are announced.
+            'protocol' => 1,
         ];
 
         if ($this->user !== null) {

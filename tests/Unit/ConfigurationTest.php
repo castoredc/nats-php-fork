@@ -53,6 +53,15 @@ class ConfigurationTest extends TestCase
         $this->assertSame(3, $configuration->maxReconnectAttempts);
     }
 
+    /**
+     * The server only pushes asynchronous INFO updates, which is how cluster
+     * topology and lame duck mode are announced, to clients at protocol level 1.
+     */
+    public function testProtocolLevelIsAdvertised()
+    {
+        $this->assertSame(1, (new Configuration())->getOptions()['protocol']);
+    }
+
     public function testClientConfigurationToken()
     {
         $connection = new Configuration(['token' => 'zzz']);

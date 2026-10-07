@@ -98,8 +98,19 @@ $client->getServers();           // every endpoint, configured and discovered
 $client->getDiscoveredServers(); // only the ones the cluster advertised
 ```
 
-The members are learned from the message that opens a connection, so a cluster
-that changes while the client is connected is picked up the next time it connects.
+`discoveredServersHandler` is called when a member the client has never seen
+before joins. Note that a cluster which is already assembled advertises itself in
+the message that opens the connection, so nothing is reported in that case: the
+pool is complete before the client is even connected.
+
+```php
+$configuration = new Configuration(
+    servers: ['one.example.com:4222'],
+    discoveredServersHandler: function (Client $client) {
+        // a member joined the cluster
+    },
+);
+```
 
 Credentials are not advertised, so a discovered server is reached with those of
 the server that advertised it. A server advertised over an encrypted connection
@@ -487,6 +498,7 @@ The following is the list of configuration options and default values.
 
 | Option                 | Default    | Description                                                                                                                                                                                 |
 | ---------------------- | ---------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `discoveredServersHandler` |        | Called when the cluster advertises a member the client has not seen before.                                                                                                                  |
 | `host`                 | `localhost` | Host to connect to (only used if `servers` is not specified).                                                                                                                              |
 | `ignoreDiscoveredServers` | `false` | Use only the configured servers, ignoring the members a cluster advertises.                                                                                                                 |
 | `inboxPrefix`          | `"_INBOX"` | Sets de prefix for automatically created inboxes                                                                                                                                            |

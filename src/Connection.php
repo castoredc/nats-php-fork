@@ -27,6 +27,9 @@ class Connection
     private $socket;
     private $context;
 
+    /** Guards the handshake against re-entering the reconnect loop. */
+    private bool $connecting = false;
+
     private float $activityAt = 0;
     private float $pingAt = 0;
     private float $pongAt = 0;
@@ -174,34 +177,18 @@ class Connection
     {
         $this->init();
 
-        $line = $message->render() . "\r\n";
-        $length = strlen($line);
-        $total = 0;
-
-        $this->logger?->debug('send ' . $line);
-
-        while ($total < $length) {
+        while (true) {
             try {
-                $written = @fwrite($this->socket, substr($line, $total, $this->packetSize));
-                if ($written === false) {
-                    throw new LogicException('Error sending data');
-                }
-                if ($written === 0) {
-                    throw new LogicException('Broken pipe or closed connection');
-                }
-                $total += $written;
-
-                if ($length === $total) {
-                    break;
-                }
+                $this->writeMessage($message);
+                break;
             } catch (Throwable $e) {
+                // Reconnects, or rethrows when reconnection is off or already
+                // in progress. The retry restarts the message from its first
+                // byte: resuming at the previous offset would write the tail of
+                // this message onto a freshly connected socket.
                 $this->processException($e);
-                $line = $message->render() . "\r\n";
-                $total = 0; // reset so the full message is resent on the fresh socket
             }
         }
-
-        unset($line);
 
         if ($message instanceof Publish) {
             if (strpos($message->subject, '$JS.API.CONSUMER.MSG.NEXT.') === 0) {
@@ -230,10 +217,26 @@ class Connection
 
     protected function init(): void
     {
-        if ($this->socket) {
+        if (is_resource($this->socket)) {
             return;
         }
 
+        // The handshake writes through sendMessage() and reads through
+        // getMessage(), both of which recover from failures by reconnecting. Left
+        // unguarded that recursion connects to another server, completes its
+        // handshake, and then unwinds back into this one, which carries on against
+        // a socket that is already connected and authenticated somewhere else.
+        $this->connecting = true;
+
+        try {
+            $this->handshake();
+        } finally {
+            $this->connecting = false;
+        }
+    }
+
+    private function handshake(): void
+    {
         $config = $this->config;
         $dsn = "$config->host:$config->port";
         $flags = STREAM_CLIENT_CONNECT;
@@ -271,6 +274,32 @@ class Connection
         }
 
         $this->sendMessage($this->connectMessage);
+
+        $this->restoreSubscriptions();
+    }
+
+    /**
+     * Replays the client's subscriptions onto a freshly established connection.
+     *
+     * This belongs to establishing a connection rather than to handling an
+     * exception: a socket that was closed underneath us is reconnected by init()
+     * itself, which never went through processException().
+     */
+    private function restoreSubscriptions(): void
+    {
+        foreach ($this->client->getSubscriptions() as $subscription) {
+            $this->sendMessage(new Subscribe([
+                'sid' => $subscription['sid'],
+                'subject' => $subscription['name'],
+                // Without the queue group a replayed subscription becomes a plain
+                // one, so every member of the group receives every message.
+                'group' => $subscription['group'] ?? null,
+            ]));
+        }
+
+        if ($this->client->requestsSubscribed()) {
+            $this->client->subscribeRequests(true);
+        }
     }
 
     protected function enableTls(bool $requireClientCert): void
@@ -303,6 +332,29 @@ class Connection
 
         if (!stream_socket_enable_crypto($this->socket, true, STREAM_CRYPTO_METHOD_TLSv1_2_CLIENT)) {
             throw new Exception('Failed to connect: Error enabling TLS');
+        }
+    }
+
+    /**
+     * Writes a message to the socket, throwing on failure rather than reconnecting.
+     */
+    private function writeMessage(Message $message): void
+    {
+        $line = $message->render() . "\r\n";
+        $length = strlen($line);
+        $total = 0;
+
+        $this->logger?->debug('send ' . $line);
+
+        while ($total < $length) {
+            $written = @fwrite($this->socket, substr($line, $total, $this->packetSize));
+            if ($written === false) {
+                throw new LogicException('Error sending data');
+            }
+            if ($written === 0) {
+                throw new LogicException('Broken pipe or closed connection');
+            }
+            $total += $written;
         }
     }
 
@@ -362,7 +414,7 @@ class Connection
     {
         $this->logger?->error($e->getMessage(), ['exception' => $e]);
 
-        if (!$this->config->reconnect) {
+        if (!$this->config->reconnect || $this->connecting) {
             throw $e;
         }
 
@@ -391,17 +443,6 @@ class Connection
                 continue;
             }
             break;
-        }
-
-        foreach ($this->client->getSubscriptions() as $subscription) {
-            $this->sendMessage(new Subscribe([
-                'sid' => $subscription['sid'],
-                'subject' => $subscription['name'],
-            ]));
-        }
-
-        if ($this->client->requestsSubscribed()) {
-            $this->client->subscribeRequests(true);
         }
     }
 

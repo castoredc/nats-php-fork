@@ -47,6 +47,8 @@ class Configuration
         public array $servers = [],
         public bool $noRandomize = false,
         public bool $ignoreDiscoveredServers = false,
+        public float $reconnectWait = 0.2,
+        public float $reconnectJitter = 0.1,
     ) {
 
         $this->setDelay($delay, $delayMode);
@@ -77,7 +79,9 @@ class Configuration
 
         if ($this->user !== null) {
             $options['user'] = $this->user;
-            $options['pass'] = $this->pass;
+            if ($this->pass !== null) {
+                $options['pass'] = $this->pass;
+            }
         } elseif ($this->token !== null) {
             $options['auth_token'] = $this->token;
         } elseif ($this->jwt !== null) {

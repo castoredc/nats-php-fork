@@ -41,7 +41,9 @@ $configuration = new Configuration(
     pass: 'secret',
 );
 
-// delay configuration options are changed via setters
+// delay configuration options are changed via setters. The delay paces the retries
+// made while reading from the connection. It does not pace reconnection attempts:
+// those wait for reconnectWait, plus up to reconnectJitter, once per pass over the servers.
 // default delay mode is constant - first retry be in 1ms, second in 1ms, third in 1ms
 $configuration->setDelay(0.001);
 
@@ -56,6 +58,59 @@ $client = new Client($configuration);
 $client->ping(); // true
 
 ```
+
+### Connecting to a cluster
+
+Pass several endpoints in `servers` instead of a single `host` and `port`. The
+client tries them in turn, both when connecting for the first time and whenever
+it has to reconnect, so one unreachable member does not take the client down.
+
+Entries may be bare `host:port`, or full urls carrying a scheme and credentials:
+`nats://user:secret@host:4222`, `tls://host:4222`. A user name with no password
+is treated as a token. Credentials are percent-decoded, so write a password containing
+`@`, `:`, `/`, `#` or `%` encoded (`p%40ss` for `p@ss`). When `servers` is set, `host` and `port` are ignored.
+
+```php
+use Basis\Nats\Client;
+use Basis\Nats\Configuration;
+
+$configuration = new Configuration(
+    servers: ['one.example.com:4222', 'two.example.com:4222', 'three.example.com:4222'],
+);
+
+$client = new Client($configuration);
+$client->ping(); // true
+```
+
+The order is shuffled by default, which spreads a fleet of clients that share one
+configuration across the cluster. Set `noRandomize: true` to connect in the order
+given.
+
+#### Discovered servers
+
+A cluster advertises its members, so the client learns about servers that were
+never configured and can fail over onto them. Discovery needs no setup, and
+`ignoreDiscoveredServers: true` turns it off if only the configured endpoints
+should ever be used.
+
+```php
+$client->getServers();           // every endpoint, configured and discovered
+$client->getDiscoveredServers(); // only the ones the cluster advertised
+```
+
+The members are learned from the message that opens a connection, so a cluster
+that changes while the client is connected is picked up the next time it connects.
+
+Credentials are not advertised, so a discovered server is reached with those of
+the server that advertised it. A server advertised over an encrypted connection
+is required to be encrypted as well: the client refuses to send its credentials
+to it otherwise. A `tls://` entry in `servers` is held to the same rule, and
+fails the connection instead of sending a cleartext CONNECT when the server does
+not negotiate TLS.
+
+The certificate is checked against `tlsCaFile`, not against the host name, for
+configured and discovered servers alike. Without `tlsCaFile` it is not checked at
+all.
 
 ### Connecting with TLS
 Typically, when connecting to a cluster with TLS enabled the connection settings do not change. The client lib will automatically switch over to TLS 1.2. However, if you're using a self-signed certificate you may have to point to your local CA file using the tlsCaFile setting.
@@ -432,16 +487,22 @@ The following is the list of configuration options and default values.
 
 | Option                 | Default    | Description                                                                                                                                                                                 |
 | ---------------------- | ---------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `host`                 | `localhost` | Host to connect to (only used if `servers` is not specified).                                                                                                                              |
+| `ignoreDiscoveredServers` | `false` | Use only the configured servers, ignoring the members a cluster advertises.                                                                                                                 |
 | `inboxPrefix`          | `"_INBOX"` | Sets de prefix for automatically created inboxes                                                                                                                                            |
 | `jwt`                  |            | Token for [JWT Authentication](https://docs.nats.io/running-a-nats-service/configuration/securing_nats/auth_intro/jwt). Alternatively you can use [CredentialsParser](#connecting-with-jwt) |
-| `maxReconnectAttempts` | `-1`       | Maximum reconnect attempts per disconnect. Negative = unlimited; `0` throws immediately on disconnect. Only applies when `reconnect` is enabled.                                            |
+| `maxReconnectAttempts` | `-1`       | Maximum failed connection attempts **per server** before that server is dropped from the pool. Negative = unlimited. Once every server is dropped, that recovery attempt gives up and raises the connection error; the next call starts again from the configured servers.                    |
 | `nkey`                 |            | Ed25519 based public key signature used for [NKEY Authentication](https://docs.nats.io/running-a-nats-service/configuration/securing_nats/auth_intro/nkey_auth).                            |
+| `noRandomize`          | `false`    | Connect to the servers in the order configured instead of shuffling them.                                                                                                                   |
 | `pass`                 |            | Sets the password for a connection.                                                                                                                                                         |
 | `pedantic`             | `false`    | Turns on strict subject format checks.                                                                                                                                                      |
 | `pingInterval`         | `2`        | Number of seconds between client-sent pings.                                                                                                                                                |
 | `port`                 | `4222`     | Port to connect to (only used if `servers` is not specified).                                                                                                                               |
 | `reconnect`            | `true`     | If true, the client reconnects automatically when the connection is lost.                                                                                                                   |
-| `timeout`              | 1          | Number of seconds the client will wait for a connection to be established.                                                                                                                  |
+| `reconnectJitter`      | `0.1`      | Upper bound, in seconds, of a random amount added to `reconnectWait`, so a fleet of clients does not reconnect in lockstep.                                                                 |
+| `reconnectWait`        | `0.2`      | Seconds to wait after every server in the pool has been tried unsuccessfully. Attempts within one pass are not delayed.                                                                     |
+| `servers`              | `[]`       | Endpoints to connect to, as `host:port` or as full urls. Replaces `host` and `port` when set. See [Connecting to a cluster](#connecting-to-a-cluster).                                       |
+| `timeout`              | 1          | Number of seconds the client will wait for a connection to be established. Confirming a connection takes a further round trip, so this has to cover that as well: a value too small to fit both makes every attempt fail, and with unlimited reconnect attempts the client keeps trying. |
 | `token`                |            | Sets a authorization token for a connection.                                                                                                                                                |
 | `tlsHandshakeFirst`    | `false`    | If true, the client performs the TLS handshake immediately after connecting, without waiting for the server’s INFO message.                                                                 |
 | `tlsKeyFile`           |            | TLS 1.2 Client key file path.                                                                                                                                                               |

@@ -5,6 +5,7 @@ declare(strict_types=1);
 namespace Tests\Unit;
 
 use Basis\Nats\Configuration;
+use Basis\Nats\Message\Connect;
 use Tests\TestCase;
 
 class ConfigurationTest extends TestCase
@@ -69,5 +70,19 @@ class ConfigurationTest extends TestCase
         $connection = new Configuration(['user' => 'nekufa', 'pass' => 't0p53cr3t']);
         $this->assertArrayHasKey('user', $connection->getOptions());
         $this->assertArrayHasKey('pass', $connection->getOptions());
+    }
+
+    /**
+     * Connect::$pass is a non-nullable string, so emitting a null password
+     * throws a TypeError when the options are hydrated into the message.
+     */
+    public function testClientConfigurationUserWithoutPassword()
+    {
+        $options = (new Configuration(['user' => 'nekufa']))->getOptions();
+
+        $this->assertArrayHasKey('user', $options);
+        $this->assertArrayNotHasKey('pass', $options);
+
+        $this->assertSame('CONNECT {"user":"nekufa"}', (new Connect(['user' => 'nekufa']))->render());
     }
 }

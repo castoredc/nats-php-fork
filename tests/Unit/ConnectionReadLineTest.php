@@ -16,11 +16,10 @@ use ReflectionProperty;
 use Tests\TestCase;
 
 /**
- * A protocol line has to be read whole however long it is. stream_get_line() only
- * recognises a two byte delimiter when both bytes fall inside the window it was
- * given, so a window that ends between the "\r" and the "\n" returns the "\r" as part
- * of the line and leaves the "\n" to be read as the start of the next one. A large
- * clustered INFO decoded to nothing, and its leftovers reached Factory as garbage.
+ * A protocol line longer than a single read chunk used to be cut in half:
+ * stream_get_line() returns the chunk without consuming the delimiter and hands the
+ * remainder back on the next call, so a large clustered INFO decoded to nothing and
+ * its leftovers reached Factory as unparsable garbage.
  */
 class ConnectionReadLineTest extends TestCase
 {
@@ -39,13 +38,13 @@ class ConnectionReadLineTest extends TestCase
 
     public function testInfoLongerThanOneChunkIsReadWhole(): void
     {
-        // 40 nodes advertised with kubernetes style dns names: well past a kilobyte.
+        // 40 nodes advertised with kubernetes style dns names: well past one chunk.
         $urls = [];
         for ($i = 0; $i < 40; $i++) {
             $urls[] = "nats-$i.nats-headless.production.svc.cluster.local:4222";
         }
 
-        $line = 'INFO ' . json_encode([
+        $info = [
             'server_id' => str_repeat('N', 56),
             'server_name' => str_repeat('N', 56),
             'version' => '2.11.4',
@@ -55,15 +54,30 @@ class ConnectionReadLineTest extends TestCase
             'max_payload' => 1048576,
             'proto' => 1,
             'connect_urls' => $urls,
-        ]);
+        ];
 
-        $this->assertGreaterThan(1024, strlen($line), 'the fixture has to exceed a kilobyte');
+        $line = 'INFO ' . json_encode($info);
+        $this->assertGreaterThan(1024, strlen($line), 'the fixture has to exceed one chunk');
 
-        $info = $this->connectionReading($line . "\r\n")->getMessage(1);
+        $info = $this->readInfo($line . "\r\n");
 
-        $this->assertInstanceOf(Info::class, $info);
         $this->assertSame($urls, $info->connect_urls);
         $this->assertSame(1048576, $info->max_payload);
+    }
+
+    public function testLineOfExactlyOneChunkIsReadWhole(): void
+    {
+        $prefix = 'INFO {"server_name":"';
+        $suffix = '","proto":1}';
+        $padding = 1024 - strlen($prefix) - strlen($suffix);
+        $name = str_repeat('x', $padding);
+        $line = $prefix . $name . $suffix;
+
+        $this->assertSame(1024, strlen($line));
+
+        $info = $this->readInfo($line . "\r\n");
+
+        $this->assertSame($name, $info->server_name);
     }
 
     /**
@@ -81,9 +95,9 @@ class ConnectionReadLineTest extends TestCase
     }
 
     /**
-     * One byte short of a window puts the carriage return in its last byte and the
-     * line feed outside it, so the delimiter was not recognised and the next protocol
-     * line was glued onto this one.
+     * One byte short of a chunk puts the carriage return in the last byte of the read
+     * window and the line feed outside it, so the delimiter is not recognised and
+     * the next protocol line used to be glued onto this one.
      *
      * @dataProvider lengthsAroundAChunkBoundary
      */
@@ -98,19 +112,17 @@ class ConnectionReadLineTest extends TestCase
 
         $connection = $this->connectionReading($line . "\r\nPONG\r\n");
 
-        $info = $connection->getMessage(1);
-        $this->assertInstanceOf(Info::class, $info);
-        $this->assertSame($name, $info->server_name);
         $this->assertInstanceOf(Pong::class, $connection->getMessage(1));
+        $this->assertSame($name, $connection->getInfoMessage()->server_name);
     }
 
     public static function lengthsAroundAChunkBoundary(): array
     {
         return [
-            'one short of a kilobyte' => [1023],
-            'a kilobyte' => [1024],
-            'one over a kilobyte' => [1025],
-            'one short of two kilobytes' => [2047],
+            'one short of a chunk' => [1023],
+            'one chunk' => [1024],
+            'one over a chunk' => [1025],
+            'one short of two chunks' => [2047],
         ];
     }
 
@@ -124,11 +136,10 @@ class ConnectionReadLineTest extends TestCase
 
         $this->assertNull($connection->getMessage(0));
 
-        fwrite($this->sockets[1], "tial\"}\r\n");
+        fwrite($this->sockets[1], "tial\"}\r\nPONG\r\n");
 
-        $info = $connection->getMessage(1);
-        $this->assertInstanceOf(Info::class, $info);
-        $this->assertSame('partial', $info->server_name);
+        $this->assertInstanceOf(Pong::class, $connection->getMessage(1));
+        $this->assertSame('partial', $connection->getInfoMessage()->server_name);
     }
 
     /**
@@ -168,6 +179,22 @@ class ConnectionReadLineTest extends TestCase
         $this->expectException(LogicException::class);
 
         $connection->getMessage(0);
+    }
+
+    /**
+     * Feeds a raw protocol line to a connection over a socket pair and returns the
+     * INFO state it ended up with. An asynchronous INFO is not handed back to
+     * callers, so the merged message is what there is to observe.
+     */
+    private function readInfo(string $wire): Info
+    {
+        $connection = $this->connectionReading($wire);
+
+        // A zero timeout consumes whatever is buffered and returns, so nothing has
+        // to be caught here and an unexpected failure is not swallowed.
+        $connection->getMessage(0);
+
+        return $connection->getInfoMessage();
     }
 
     private function connectionReading(string $wire): Connection

@@ -44,6 +44,9 @@ class Configuration
         public string $version = 'dev',
         public string $inboxPrefix = '_INBOX',
         public int $maxReconnectAttempts = -1,
+        public array $servers = [],
+        public bool $noRandomize = false,
+        public bool $ignoreDiscoveredServers = false,
     ) {
 
         $this->setDelay($delay, $delayMode);

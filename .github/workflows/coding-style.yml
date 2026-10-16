@@ -1,5 +1,8 @@
 name: coding-style
-on: [push, pull_request]
+on:
+  push:
+    branches: [main]
+  pull_request:
 jobs:
   php-cs-verify:
     runs-on: ubuntu-latest

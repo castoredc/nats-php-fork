@@ -1,5 +1,8 @@
 name: tests
-on: [push, pull_request]
+on:
+  push:
+    branches: [main]
+  pull_request:
 jobs:
   test:
     runs-on: ubuntu-latest
@@ -34,8 +37,3 @@ jobs:
           NATS_CLIENT_VERBOSE: ${{ matrix.verbose }}
       - name: Coverage text report
         run: cat coverage/report.txt
-      - name: Coveralls
-        if: matrix.php == '8.4' && matrix.verbose == '1'
-        uses: coverallsapp/github-action@v2
-        with:
-          files: coverage/report.clover

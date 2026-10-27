@@ -247,15 +247,15 @@ class StreamTest extends FunctionalTestCase
         ]));
         $this->assertWrongNumPending($consumer);
 
-        // 500ms sleep
-        usleep(500 * 1_000);
+        // sleep past the 500ms window: sleeping exactly 500ms races the server clock
+        usleep(750 * 1_000);
 
         $stream->put('tester', new Payload("hello", [
             'Nats-Msg-Id' => 'the-message'
         ]));
         $this->assertWrongNumPending($consumer, 1);
 
-        usleep(500 * 1_000);
+        usleep(750 * 1_000);
 
         $stream->put('tester', new Payload("hello", [
             'Nats-Msg-Id' => 'the-message'
